@@ -1,6 +1,15 @@
-# bonsai-backend
+# hotshuttle
 
-Backend tooling to run **Bonsai 27B** locally and serve it to agent harnesses — PrismML's ternary
+*(formerly `bonsai-backend`)*
+
+Local orchestration tooling: one loaded copy of a local model on a single 8 GB GPU serving
+**many** small worker agents, by paging each worker's context state between VRAM (hot) and
+system RAM (warm) through llama-server slots — driven by a capable orchestrator model.
+**The orchestration layer is in planning — see [`docs/PLAN.md`](docs/PLAN.md)** (implementation
+plan) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (component specs).
+
+What exists today is the **serving layer** that the orchestration builds on: tooling to run
+**Bonsai 27B** locally and serve it to agent harnesses — PrismML's ternary
 (1.58-bit, `Q2_0_g128`) build of Qwen3.6-27B, run via PrismML's llama.cpp fork. Vision-capable,
 262K-token model, tool-calling, OpenAI-compatible API. This repo is the scripts/config only; the
 ~10 GB weights and the vendored fork are fetched separately (see Setup).
