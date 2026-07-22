@@ -1,0 +1,13 @@
+# Model weights — download separately (public HF repo, no token). See README "Setup".
+models/
+*.gguf
+
+# Vendored PrismML llama.cpp fork + build outputs. Clone + build.bat; see README "Setup".
+llama.cpp/
+
+# Transient benchmark/server logs and scratch (server.log, DRAFT.md, probe texts, etc.)
+bench-logs/
+
+# Python
+__pycache__/
+*.pyc
