@@ -1,0 +1,25 @@
+{
+  "extraKnownMarketplaces": {
+    "workforce": {
+      "source": {
+        "source": "github",
+        "repo": "CameronCrow/workforce"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "workforce@workforce": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
