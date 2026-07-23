@@ -1,6 +1,6 @@
 # hotshuttle — Implementation Plan
 
-**Status:** M0 ✅ · M1 ✅ · M2 next · 2026-07-22
+**Status:** M0 ✅ · M1 ✅ · M2 ✅ · M3 next · 2026-07-22
 **Design source of record:** `brainstorm-vault/Ideas/Moving Off Claude To Open Weights.md`
 (private repo; sections "KV-cache tiering on one 8GB card", "Tuning the knobs", and
 "Orchestration layer: how Fable actually drives the workers", all dated 2026-07-22).
@@ -501,7 +501,48 @@ ingest) instead of a ~10 ms blob copy. Mitigations, in order: keep contexts shor
 containing the #22384 fix; escalate to the C-API route (`llama_state_seq_*`) which the
 fixes target more directly. Record the outcome in this file either way.
 
-### M2 — SlotPool ping-pong: two workers, one slot
+### M2 — SlotPool ping-pong: two workers, one slot ✅ DONE 2026-07-22
+
+> **All five acceptance criteria pass** (`experiments/m2_pingpong.py`, 8 dispatches, 2
+> workers, `n_slots=1` so every turn evicts the other worker):
+>
+> | | result |
+> |---|---|
+> | warm turns evaluate only the suffix | **22 tokens evaluated, ~1450 reused**, every turn |
+> | each worker recalls its own fact | 6/6 |
+> | no cross-worker contamination | 0/6 leaked |
+> | paging overhead | **1.2 %** of generation time (1.87 s over 13 ops vs 161 s) |
+> | saves matched evictions | 7 evictions, 7 saves |
+>
+> This is also the real probe **risk #4** needed. M1's planted fact also sat in the
+> re-sent prefix, so recall there could not distinguish restored state from a re-read
+> prompt. Here each worker's code is *never* present in the other's prompt, and neither
+> leaked — recurrent state restores cleanly, not just plausibly.
+>
+> Re-prefill across this particular run was 25.4 %, above M5's < 15 % bar, but that run is
+> 8 dispatches of which 2 are cold seeds; the ratio is dominated by unavoidable first
+> fills at this length. M5 measures it over a realistic workload.
+>
+> **Deviations from the plan, both deliberate:**
+> - `core/` lives under a `hotshuttle/` package rather than at the repo root, so imports
+>   are `hotshuttle.core.pool` rather than a top-level `core`. `profiles/bonsai/` is one
+>   module (`profiles/bonsai.py`) rather than a package — a directory for a sample size of
+>   one. The seam itself is unchanged and `tests/test_seam.py` enforces it.
+> - §10's fake llama-server is an **in-process fake client** (`tests/fake.py`), not an
+>   aiohttp/FastAPI stub. SlotPool only ever touches five client methods, so modelling
+>   those directly gives the same coverage with no dependency and no port; the real HTTP
+>   path is covered by the gpu experiments. Same reasoning replaced `pytest-asyncio` with
+>   a 10-line hook in `conftest.py`.
+> - The GPU semaphore §7 assigns to the scheduler lives **inside SlotPool** instead.
+>   Bounding concurrent dispatch to `n_slots` is what guarantees eviction always finds an
+>   unlocked victim, so it belongs to the pool's own correctness rather than its caller's
+>   good behaviour. M4's scheduler no longer needs one.
+>
+> Writing `tests/test_seam.py` immediately caught two leaks: `Llama` defaulted to
+> `http://127.0.0.1:8080` and `Role.ctx_budget` defaulted to `12288`. Both now have no
+> default and come from the profile.
+
+**Original plan:**
 
 `Llama` client + `Worker` + `SlotPool` with `n_slots=1`; workers A and B alternate turns
 (A1, B1, A2, B2, …), forcing save/evict/restore on every dispatch.
