@@ -64,8 +64,11 @@ class FakeLlama:
             self.cached[id_slot] = toks + out
         finally:
             self.busy.discard(id_slot)
+        # Report the simulated latency as server compute so scheduler stats are exercised.
         return Completion(content=content, prompt_n=len(toks) - n_cached, cache_n=n_cached,
-                          predicted_n=len(out), id_slot=id_slot)
+                          predicted_n=len(out), id_slot=id_slot,
+                          prompt_ms=self.latency * 1000 * 0.5,
+                          predicted_ms=self.latency * 1000 * 0.5)
 
     async def save(self, id_slot, filename):
         self._guard(id_slot, "save")

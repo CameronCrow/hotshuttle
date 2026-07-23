@@ -6,6 +6,9 @@ paging decision to SlotPool.
 """
 from __future__ import annotations
 
+import asyncio
+from collections import defaultdict
+
 from . import compiler
 from .pool import SlotPool
 from .worker import Role, Task, Worker
@@ -41,6 +44,12 @@ class Orchestrator:
         self.guard = compiler.PrefixGuard()
         self.reprefilled = 0        # tokens re-evaluated across the run
         self.total_prompt = 0       # tokens prompted across the run
+        self.server_ms = 0.0        # time the server spent computing
+        # One turn at a time per worker. A worker's transcript is append-only and its
+        # compaction rewrites the seed, so two concurrent turns for the same worker would
+        # interleave into each other's context. The orchestrator is the serialization
+        # point; the pool serializes slots, which is a different thing.
+        self._turn_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     # --- worker lifecycle --------------------------------------------------
 
@@ -56,30 +65,37 @@ class Orchestrator:
     # --- the hot path ------------------------------------------------------
 
     async def dispatch(self, task: Task, auto_compact: bool = True):
-        """Run one turn for one worker, paging its state in if it is not already hot."""
+        """Run one turn for one worker, paging its state in if it is not already hot.
+
+        Concurrent dispatches for *different* workers overlap freely (that is the whole
+        point of the scheduler); concurrent dispatches for the *same* worker queue behind
+        each other, including behind a compaction it triggered.
+        """
         w = self.workers[task.worker_id]
         tmpl = self.profile.template
 
-        # Append-only (I3): the turn is added before dispatch and never rewritten after.
-        w.transcript += compiler.render_turn(tmpl, task.instruction, list(task.attach))
-        prompt = w.prompt
-        self.guard.check(w.id, prompt)
+        async with self._turn_locks[w.id]:
+            # Append-only (I3): the turn is added before dispatch, never rewritten after.
+            w.transcript += compiler.render_turn(tmpl, task.instruction, list(task.attach))
+            prompt = w.prompt
+            self.guard.check(w.id, prompt)
 
-        sampling = {**self.profile.sampling_defaults, **w.role.sampling}
-        async with self.pool.slot_for(w) as slot:
-            resp = await self.llama.complete(prompt, id_slot=slot,
-                                             n_predict=w.role.max_out,
-                                             cache_prompt=True, **sampling)
+            sampling = {**self.profile.sampling_defaults, **w.role.sampling}
+            async with self.pool.slot_for(w) as slot:
+                resp = await self.llama.complete(prompt, id_slot=slot,
+                                                 n_predict=w.role.max_out,
+                                                 cache_prompt=True, **sampling)
 
-        w.transcript += compiler.close_turn(tmpl, resp.content)
-        w.n_ctx_used = resp.n_ctx_used
-        w.touch()
-        self.reprefilled += resp.prompt_n
-        self.total_prompt += resp.prompt_tokens
+            w.transcript += compiler.close_turn(tmpl, resp.content)
+            w.n_ctx_used = resp.n_ctx_used
+            w.touch()
+            self.reprefilled += resp.prompt_n
+            self.total_prompt += resp.prompt_tokens
+            self.server_ms += resp.server_ms
 
-        if auto_compact and w.needs_compaction:
-            await self.compact(w)
-        return resp
+            if auto_compact and w.needs_compaction:
+                await self.compact(w)
+            return resp
 
     # --- compaction (I4) ---------------------------------------------------
 

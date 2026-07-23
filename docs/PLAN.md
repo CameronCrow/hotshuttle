@@ -1,6 +1,6 @@
 # hotshuttle — Implementation Plan
 
-**Status:** M0 ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 next · 2026-07-22
+**Status:** M0 ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 next · 2026-07-22
 **Design source of record:** `brainstorm-vault/Ideas/Moving Off Claude To Open Weights.md`
 (private repo; sections "KV-cache tiering on one 8GB card", "Tuning the knobs", and
 "Orchestration layer: how Fable actually drives the workers", all dated 2026-07-22).
@@ -586,7 +586,40 @@ post-reset (planted early fact survives *via the summary*); post-compaction
 `n_ctx_used` ≈ seed size; the fresh seed prefills once and subsequent turns are
 suffix-only again; the retired blob file is deleted.
 
-### M4 — Async scheduler + idle-fill
+### M4 — Async scheduler + idle-fill ✅ DONE 2026-07-22
+
+> **All five acceptance criteria pass** (`experiments/m4_scheduler.py`, 8 turns across 2
+> workers on 1 slot, 2 s of simulated orchestrator work per turn):
+>
+> | | wall | server compute | GPU busy |
+> |---|---:|---:|---:|
+> | serial | 27.8 s | 10.6 s | 38 % |
+> | scheduled | **13.5 s** | 10.2 s | **76 %** |
+>
+> **51.5 % wall-clock reduction**, against the plan's ≥ 25 % target. That target is really
+> a property of the workload rather than of the scheduler — overlap can only ever hide the
+> smaller of (generation, orchestrator work), so the run also reports the achievable
+> ceiling for the mix (50.4 %) and how much of it was recovered (102 %, i.e. the whole of
+> it, the small overshoot being run-to-run generation variance).
+>
+> **§7's "+1 loop, more buys nothing" is wrong**, and measurably so. It holds only while
+> orchestrator-side work is *shorter* than generation. Once it is longer, every loop can
+> be sitting in `handle()` at the same time and the slot idles regardless of queue depth.
+> On this workload (2 s of orchestrator work against ~1.4 s generations): +1 → 15.2 s,
+> **+2 → 13.5 s**, +3 → 14.0 s. Roughly `ceil(handle / generation)` loops. `extra_loops`
+> stays at 1 by default because that is right for the intended case — a frontier
+> orchestrator turn is fast next to a local 27B generation — and is now a documented knob.
+>
+> Two things this milestone corrected in the implementation:
+> - **A per-worker turn lock in `Orchestrator`.** Two queued turns for the same worker
+>   would otherwise interleave into one append-only transcript. This is also what makes
+>   M4's "graceful behavior when a task targets a worker mid-compaction" true: the lock
+>   covers the compaction, so the queued turn lands on the new seed rather than a
+>   half-reset worker.
+> - **The GPU-busy metric was junk at first.** It divided summed time-inside-`dispatch`
+>   by wall clock, which counts queueing and double-counts concurrent dispatches — it
+>   reported 145 % utilisation. Now measured from the server's own `prompt_ms +
+>   predicted_ms`, which is bounded by `n_slots` and means what it says.
 
 The `asyncio` queue + GPU semaphore (`n_slots`) loop; `n_slots + 1` worker loops so one
 task is always queued behind the semaphore.

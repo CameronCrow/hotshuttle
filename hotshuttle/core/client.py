@@ -36,12 +36,24 @@ class Completion:
     cache_n: int           # prompt tokens reused from the slot's cache
     predicted_n: int       # tokens generated
     id_slot: int
+    prompt_ms: float = 0.0
+    predicted_ms: float = 0.0
     raw: dict = field(repr=False, default_factory=dict)
 
     @property
     def prompt_tokens(self) -> int:
         """Full prompt length -- evaluated plus reused."""
         return self.prompt_n + self.cache_n
+
+    @property
+    def server_ms(self) -> float:
+        """Time the server spent computing: prefill plus decode.
+
+        This is the honest denominator for "was the GPU busy". Wall time inside dispatch
+        is not -- it also contains queueing for a slot, and summing it across concurrent
+        dispatches can exceed 100% of wall clock, which measures nothing.
+        """
+        return self.prompt_ms + self.predicted_ms
 
     @property
     def n_ctx_used(self) -> int:
@@ -89,6 +101,8 @@ class Llama:
         return Completion(content=d.get("content", ""),
                           prompt_n=t.get("prompt_n", 0), cache_n=t.get("cache_n", 0),
                           predicted_n=t.get("predicted_n", 0),
+                          prompt_ms=t.get("prompt_ms", 0.0),
+                          predicted_ms=t.get("predicted_ms", 0.0),
                           id_slot=d.get("id_slot", id_slot), raw=d)
 
     async def save(self, id_slot: int, filename: str) -> None:
