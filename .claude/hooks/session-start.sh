@@ -12,8 +12,17 @@
 # this file is deployed verbatim by workforce/plugins/cloud/deploy-cloud-hooks.py.
 set -uo pipefail
 
-[ -n "${CLAUDE_CODE_REMOTE:-}" ] || exit 0
-command -v claude >/dev/null 2>&1 || { echo "[cloud-bootstrap] no claude CLI; skip"; exit 0; }
+# Skip only when we're clearly on a machine that already has the workforce skills
+# installed locally (the junction install puts every skill in ~/.claude/skills).
+# Gating on CLAUDE_CODE_REMOTE alone was fragile: if that variable isn't set in a
+# cloud sandbox the hook silently no-ops and nothing gets installed. Checking for
+# the local install instead is correct in both directions.
+if [ -z "${CLAUDE_CODE_REMOTE:-}" ] && [ -d "$HOME/.claude/skills/git-safe-ops" ]; then
+  exit 0
+fi
+
+command -v claude >/dev/null 2>&1 || { echo "[cloud-bootstrap] no claude CLI on PATH; skip"; exit 0; }
+echo "[cloud-bootstrap] starting (remote=${CLAUDE_CODE_REMOTE:-unset})"
 
 claude plugin marketplace add CameronCrow/workforce --scope user >/dev/null 2>&1 || true
 
