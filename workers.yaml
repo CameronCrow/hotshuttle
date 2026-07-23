@@ -1,0 +1,42 @@
+# hotshuttle worker manifest.
+#
+# `model` binds the runtime; every value here is measured, not guessed -- see
+# bench-results.md "Correction". `roles` declares what kinds of worker exist.
+# Unknown keys are rejected rather than ignored, so typos fail at load.
+
+model:
+  server: http://127.0.0.1:8080
+  n_slots: 1                 # 1 hot slot on an 8 GB card; a worker costs ~559 MiB at 12K
+  ctx_per_slot: 12288        # 12K @ q8_0 runs full speed with ~845 MiB left for the desktop
+  kv_quant: q8_0             # tool-call rate is what a worker fleet lives on, not perplexity
+  sampling_defaults:
+    temperature: 0.2         # workers want repeatable output, not the model card's 0.7
+    top_p: 0.9
+
+roles:
+  - name: code-reader
+    system: |
+      You are a focused code-reading worker. Answer ONE scoped question about the
+      material you are given. Output only the answer -- no preamble, no restating
+      the question, no offers of further help.
+    tools: [read_file, grep]
+    ctx_budget: 12288
+    max_out: 1024
+    compact_at: 0.8
+
+  - name: test-writer
+    system: |
+      You write one pytest test for the function you are given. Return only the test
+      code, no explanation and no markdown fence.
+    tools: [read_file]
+    ctx_budget: 12288
+    max_out: 1536
+    compact_at: 0.8
+
+  - name: summarizer
+    system: |
+      You condense the material you are given into terse notes. Preserve concrete
+      facts, identifiers and file paths; drop restated instructions. Output only notes.
+    ctx_budget: 8192
+    max_out: 512
+    compact_at: 0.8

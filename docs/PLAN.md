@@ -1,6 +1,6 @@
 # hotshuttle — Implementation Plan
 
-**Status:** M0 ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 next · 2026-07-22
+**Status:** M0-M5 all ✅ complete · 2026-07-22
 **Design source of record:** `brainstorm-vault/Ideas/Moving Off Claude To Open Weights.md`
 (private repo; sections "KV-cache tiering on one 8GB card", "Tuning the knobs", and
 "Orchestration layer: how Fable actually drives the workers", all dated 2026-07-22).
@@ -630,7 +630,27 @@ wall-clock reduction on a scripted 10-turn workload — my estimate, tune after 
 real switch timings); invariants still hold under concurrency (fuzzed interleavings);
 graceful behavior when a task targets a worker mid-compaction.
 
-### M5 — Manifest + profile hardening (wrap-up)
+### M5 — Manifest + profile hardening (wrap-up) ✅ DONE 2026-07-22
+
+> **All four acceptance criteria pass** (`experiments/m5_fanout.py`). Four workers, one
+> physical slot, driven from `workers.yaml` through the scheduler: each is seeded with a
+> different real source file from this repo, then asked eight scoped questions
+> round-robin, so consecutive turns always target a different worker and the pool evicts
+> on nearly every dispatch.
+>
+> - **36 dispatches in 118 s**, unattended, no errors
+> - **11.4 % of prompt tokens re-evaluated** (5833 / 51013) against the < 15 % bar —
+>   35 evictions, 32 restores, 4 cold fills
+> - every worker still held its own file's context at the end, and answered from it:
+>   the pool worker said "Slot allocator and evictor", the compiler worker cited
+>   whitespace changes in the seed invalidating the cache. No cross-contamination.
+>
+> `tests/test_manifest.py` caught a real bug on first run: `BonsaiProfile` did not accept
+> `sampling_defaults`, so a manifest setting it would have been silently ignored and every
+> worker would have run on the hardcoded defaults. Rejecting unknown *keys* does not help
+> when the key is known and the consumer drops it — the test that mattered was the one
+> that builds a real profile from the shipped manifest rather than validating it in
+> isolation.
 
 `workers.yaml` loading/validation, `BonsaiProfile` extracted per §5, the core/profile
 grep test, end-to-end demo: an orchestrator script drives 4 logical workers through a

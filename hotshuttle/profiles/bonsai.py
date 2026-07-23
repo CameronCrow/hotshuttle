@@ -77,7 +77,8 @@ class BonsaiProfile:
 
     def __init__(self, ctx_per_slot: int = DEFAULT_CTX, n_slots: int = 1,
                  kv_quant: str = DEFAULT_KV_QUANT, server_url: str | None = None,
-                 slot_save_path: str | None = None):
+                 slot_save_path: str | None = None,
+                 sampling_defaults: dict | None = None):
         if kv_quant not in KV_BYTES_PER_TOKEN:
             raise ValueError(f"kv_quant must be one of {sorted(KV_BYTES_PER_TOKEN)}")
         self.ctx_per_slot = ctx_per_slot
@@ -92,7 +93,10 @@ class BonsaiProfile:
         self.kv_bytes_per_token = KV_BYTES_PER_TOKEN[kv_quant]
         # Workers want repeatable output, not the model card's creative defaults
         # (temp 0.7 / top-p 0.95, which bonsai.sh still passes for chat callers).
-        self.sampling_defaults = {"temperature": 0.2, "top_p": 0.9}
+        # Overridable so a manifest's `sampling_defaults` is honoured rather than
+        # silently dropped -- caught by tests/test_manifest.py.
+        self.sampling_defaults = dict(sampling_defaults
+                                      or {"temperature": 0.2, "top_p": 0.9})
         self.template = QwenChatML()
 
     def slot_bytes(self, n_tokens: int) -> int:

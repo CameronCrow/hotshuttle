@@ -5,10 +5,57 @@
 Local orchestration tooling: one loaded copy of a local model on a single 8 GB GPU serving
 **many** small worker agents, by paging each worker's context state between VRAM (hot) and
 system RAM (warm) through llama-server slots — driven by a capable orchestrator model.
-**The orchestration layer is in build — see [`docs/PLAN.md`](docs/PLAN.md)** (implementation
-plan) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (component specs). M0 (serving config +
-VRAM budget) and M1 (does slot paging actually skip re-prefill? — **yes**) are done; see
-[`experiments/`](experiments/). Next is M2, the SlotPool.
+**The orchestration layer works** — see [`docs/PLAN.md`](docs/PLAN.md) (implementation plan,
+with every measurement) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (component specs).
+Milestones M0–M5 are done and each has a runnable acceptance script under
+[`experiments/`](experiments/).
+
+## Orchestration quick-start
+
+```bash
+bash bonsai.sh start                       # 12K ctx @ q8_0 KV, slot save/restore enabled
+python experiments/m5_fanout.py            # 4 workers, 1 GPU slot, end-to-end demo
+python -m pytest tests/ -q                 # 70 tests, no GPU needed
+```
+
+```python
+import asyncio
+from hotshuttle.core import manifest
+from hotshuttle.core.client import Llama
+from hotshuttle.core.orchestrator import Orchestrator
+from hotshuttle.core.pool import SlotPool
+from hotshuttle.core.scheduler import Scheduler
+from hotshuttle.core.worker import Task
+from hotshuttle.profiles.bonsai import BonsaiProfile
+
+m = manifest.load("workers.yaml")
+profile = BonsaiProfile(**m.model_kwargs())
+llama = Llama(profile.server_url)
+orc = Orchestrator(llama, SlotPool(llama, profile.n_slots,
+                                   slot_dir=profile.slot_save_path), profile)
+
+for wid in ("alpha", "beta", "gamma"):     # more workers than slots -- that's the point
+    orc.spawn(wid, m.roles["code-reader"])
+
+s = Scheduler(orc, handle=my_processing)   # your work runs off-GPU, overlapping generation
+s.submit(Task("alpha", "What does this do?", attach=(source_code,)),
+         Task("beta", "Find the error paths.", attach=(other_file,)))
+asyncio.run(s.run())
+print(f"re-prefilled {orc.reprefill_ratio:.1%} of prompt tokens")
+```
+
+Each worker keeps its own context across turns even though only one fits in VRAM at a time:
+the pool saves the occupant's state before reusing its slot and restores it on the way back
+in, so a returning worker evaluates only its new turn. Measured across the M5 demo — 36
+dispatches, 4 workers, 1 slot — **11.4 %** of prompt tokens were re-evaluated; the rest came
+from cache. Workers whose context outgrows `ctx_budget` are compacted: retired and re-seeded
+with a summary, because an append-only prompt cannot be shrunk in place.
+
+**Pass your own `summarize=` to `Orchestrator`** if you are driving this from a capable model.
+The built-in fallback asks Bonsai to summarize itself, and M3 caught it emitting
+"Acknowledged." as an entire worker's memory while every mechanical check passed.
+
+Stdlib only, except PyYAML for reading `workers.yaml` (build `Role` objects directly to skip it).
 
 What exists today is the **serving layer** that the orchestration builds on: tooling to run
 **Bonsai 27B** locally and serve it to agent harnesses — PrismML's ternary
