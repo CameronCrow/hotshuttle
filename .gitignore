@@ -11,3 +11,6 @@ bench-logs/
 # Python
 __pycache__/
 *.pyc
+
+# MSYS crash dumps
+*.stackdump

@@ -17,7 +17,7 @@ Stdlib only. Assumes the server is up (`bash bonsai.sh start`) or call .ensure_u
 
 Self-check:  python bonsai_client.py
 """
-import json, os, re, subprocess, time, urllib.request
+import json, os, re, shutil, subprocess, time, urllib.request
 
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
@@ -65,8 +65,12 @@ class Bonsai:
         """Start the server via bonsai.sh if it isn't already answering."""
         if self.healthy():
             return True
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bonsai.sh")
-        subprocess.run(["bash", script, "start"], check=True)
+        # Forward slashes, not os.path.join: MSYS strips the backslashes out of a Windows
+        # path argument ("C:\a\b.sh" -> "C:absh"), so the script is silently not found.
+        # Explicit bash, not a bare "bash": Windows searches System32 first and would
+        # find WSL's bash.exe, which cannot see C:/... paths at all.
+        script = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/") + "/bonsai.sh"
+        subprocess.run([shutil.which("bash") or "bash", script, "start"], check=True)
         for _ in range(wait_s // 2):
             if self.healthy():
                 return True

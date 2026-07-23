@@ -1,0 +1,9 @@
+<|im_start|>system
+SYSTEM_MARKER<|im_end|>
+<|im_start|>user
+USER_MARKER<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+

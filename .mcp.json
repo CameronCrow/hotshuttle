@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "hotshuttle": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp_server/hotshuttle_mcp.py"]
+    }
+  }
+}

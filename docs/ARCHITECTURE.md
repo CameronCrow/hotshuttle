@@ -130,10 +130,16 @@ class Llama:
         return await GET(f"{self.base}/slots")
 ```
 
-Response fields the layer above depends on: `content`, `tokens_evaluated` (prompt
-tokens actually processed — the re-prefill telemetry), `tokens_predicted`, `timings`.
-The client surfaces these verbatim; `tokens_evaluated` is asserted in tests on every
-dispatch (a silent re-prefill regression becomes a test failure).
+Response fields the layer above depends on: `content`, `tokens_predicted`, and
+`timings` — specifically **`timings.prompt_n`** (prompt tokens actually evaluated) and
+**`timings.cache_n`** (prompt tokens reused from the slot's cache). Together they are the
+re-prefill telemetry. The client surfaces them verbatim; `prompt_n` is asserted in tests on
+every dispatch, so a silent re-prefill regression becomes a test failure.
+
+> **Do not use `tokens_evaluated` for this** (as an earlier draft of this section said).
+> Despite the name it reports the *full prompt length* whether or not the prompt was
+> cached — measured in M1 at 2643 on a request that evaluated 28 tokens and reused 2615.
+> An assertion on it can never fail.
 
 Uses the raw `/completion` endpoint, **not** `/v1/chat/completions` — `id_slot` plus
 byte-stable prompts are the mechanism, and a server-side template re-render cannot be
@@ -229,7 +235,9 @@ class Orchestrator:
                 prompt, id_slot=slot, n_predict=w.role.max_out,
                 cache_prompt=True, **w.role.sampling)                # server evaluates only the new suffix
         w.transcript += resp.content
-        w.n_ctx_used = resp.tokens_evaluated + resp.tokens_predicted
+        # prompt_n + cache_n is the whole prompt; + predicted is the slot's new fill level.
+        # (resp.tokens_evaluated would double-count: it is already the full prompt length.)
+        w.n_ctx_used = resp.timings.prompt_n + resp.timings.cache_n + resp.tokens_predicted
         w.last_used = clock()
         if w.n_ctx_used > w.role.ctx_budget * w.role.compact_at:
             await self.compact(w)                                    # I4: retire + re-seed
