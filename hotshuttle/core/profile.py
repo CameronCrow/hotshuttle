@@ -22,6 +22,15 @@ class ChatTemplate(Protocol):
     def assistant_open(self) -> str: ...
     def assistant_close(self) -> str: ...
 
+    def to_plain(self, rendered: str) -> str:
+        """Rendered prompt bytes back to readable text, control tokens removed.
+
+        Needed whenever a transcript becomes *content* for another prompt -- summarizing
+        for a compaction, or logging. Feeding raw template bytes back in nests one
+        conversation inside another and the model answers it instead of reading it.
+        """
+        ...
+
 
 @runtime_checkable
 class ModelProfile(Protocol):

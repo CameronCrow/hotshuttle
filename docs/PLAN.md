@@ -1,6 +1,6 @@
 # hotshuttle — Implementation Plan
 
-**Status:** M0 ✅ · M1 ✅ · M2 ✅ · M3 next · 2026-07-22
+**Status:** M0 ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 next · 2026-07-22
 **Design source of record:** `brainstorm-vault/Ideas/Moving Off Claude To Open Weights.md`
 (private repo; sections "KV-cache tiering on one 8GB card", "Tuning the knobs", and
 "Orchestration layer: how Fable actually drives the workers", all dated 2026-07-22).
@@ -553,7 +553,29 @@ uncontaminated (each recalls its own planted fact, never the other's); pool inva
 hold under an interleaving stress test (no dispatch to a processing slot, no evict
 without save); total wall-clock overhead of switching < 10 % of generation time.
 
-### M3 — Compaction as reset
+### M3 — Compaction as reset ✅ DONE 2026-07-22
+
+> **All seven acceptance criteria pass** (`experiments/m3_compaction.py`, one worker,
+> `ctx_budget=2500`, `compact_at=0.8`). The worker grew to 1930 tokens over six turns,
+> compacted, and continued on a 50-token seed; the next turn evaluated 20 and reused 58.
+> The fact planted in turn 1 survived via the summary and the probe answered
+> `Part # XR-3390`. The superseded warm blob was deleted.
+>
+> **It failed the first run, and the reason is worth keeping.** A worker's transcript *is
+> rendered template bytes*, and `_local_summarize` was passing it to the summarizer
+> verbatim — nesting a conversation inside a conversation. Bonsai read the embedded
+> `<|im_start|>assistant` as its own turn and replied "Acknowledged.", which became the
+> entire summary; the worker lost everything it knew and the probe answered `123456`.
+> Every mechanical criterion passed while this happened. Fixed by adding `to_plain()` to
+> the `ChatTemplate` seam (the profile owns its own control tokens) and regression-tested
+> in `tests/test_compaction.py`.
+>
+> **This is what open question 1 looks like in practice** — not a quality gradient but a
+> cliff, and one that produces a confident, fluent, empty summary rather than an error.
+> The local summarizer now works on this probe, but it took a deliberate fix to get there
+> and the failure mode is invisible from the outside. `Orchestrator(summarize=...)` takes
+> an injected async callable for exactly this reason; the local implementation is the
+> fallback that keeps the package runnable standalone, not the recommendation.
 
 Add `Orchestrator.compact()`: at `compact_at × ctx_budget`, summarize (via the
 orchestrator's own model or a scoped Bonsai call), erase the slot state, re-seed with
@@ -627,10 +649,13 @@ updated with orchestration quick-start.
 
 Open questions needing a human decision:
 
-1. **Where does compaction summarization run?** Options: the orchestrator's own model
-   (best quality, costs API tokens), or a scoped Bonsai self-summarize (free, but the
-   design source's own research warns weak models corrupt memory — "Silent Failure").
-   Plan default: orchestrator-side; revisit after M3 measurements.
+1. ~~**Where does compaction summarization run?**~~ **Settled by M3.** `Orchestrator`
+   takes an injected `summarize` callable; supply one running on the orchestrator's own
+   model. A scoped Bonsai self-summarize ships as the standalone fallback but is not the
+   recommendation: M3 caught it emitting "Acknowledged." as an entire worker's memory
+   while every mechanical check passed. That is the "Silent Failure" the design source
+   warned about, and it is a cliff rather than a gradient — worth re-measuring on any
+   new model before trusting a local summarizer.
 2. **Fork maintenance posture** if risk #2 materializes: rebase PrismML's fork ourselves
    vs. wait for PrismML. Not decidable until M0/M1 produce facts.
 

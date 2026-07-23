@@ -10,6 +10,7 @@ All sizing constants below are MEASURED, not computed -- see bench-results.md
 from __future__ import annotations
 
 import os
+import re
 
 # --- measured constants ------------------------------------------------------
 
@@ -57,6 +58,18 @@ class QwenChatML:
 
     def assistant_close(self) -> str:
         return "<|im_end|>\n"
+
+    def to_plain(self, rendered: str) -> str:
+        """Strip ChatML back to readable turns.
+
+        Compaction summarizes a worker's transcript, and a transcript is rendered template
+        bytes. Passing those in verbatim nests a conversation inside a conversation:
+        measured in M3, Bonsai read the embedded <|im_start|>assistant markers as its own
+        turn and replied "Acknowledged." instead of summarizing anything.
+        """
+        text = rendered.replace("<think>\n\n</think>\n\n", "")
+        text = re.sub(r"<\|im_start\|>(\w+)\n", r"\n\1: ", text)
+        return text.replace("<|im_end|>", "").strip()
 
 
 class BonsaiProfile:
