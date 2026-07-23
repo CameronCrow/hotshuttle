@@ -20,15 +20,23 @@ KV/token = 64·4·(256+256)·bytes → **f16 256 KB, q8_0 128 KB, q4_0 64 KB** p
 >
 > | quantity | this doc computed | measured 2026-07-22 |
 > |---|---:|---:|
-> | KV/token @ q8_0 | 128 KiB | **~37–40 KiB** |
-> | KV/token @ q4_0 | 64 KiB | **~22–23 KiB** |
+> | KV/token @ q8_0 | 128 KiB | **34.1 KiB** |
+> | KV/token @ q4_0 | 64 KiB | **18.1 KiB** |
 > | fixed recurrent state per slot | not modeled | **149.6 MiB** |
 >
-> KV/token is the measured *slope* of VRAM against `-c` at fixed quant (10240→16384
-> tokens). The recurrent state is llama.cpp's own figure (`created context checkpoint …
-> size = 149.626 MiB`, independent of token count) and is corroborated by a saved slot
-> blob for a 5-token prompt weighing 149.8 MiB. It is f32 and **not quantizable** —
-> decoding is recurrent, so quantization error accumulates down the sequence.
+> The recurrent state is llama.cpp's own figure (`created context checkpoint … size =
+> 149.626 MiB`, independent of token count), corroborated by a saved slot blob for a
+> 5-token prompt weighing 149.8 MiB. It is f32 and **not quantizable** — decoding is
+> recurrent, so quantization error accumulates down the sequence rather than staying
+> local to its token.
+>
+> KV/token is measured by differencing **saved slot blobs** (M1): a 2611-token worker
+> saves at 236.5 MiB under q8_0 and 195.7 MiB under q4_0, so subtracting the 149.6 MiB
+> floor gives 34.1 and 18.1 KiB/token. This supersedes an earlier estimate here of
+> ~37–40 / ~22–23 KiB/token taken from the *slope of `nvidia-smi` against `-c`* — that
+> instrument is confounded by desktop VRAM drift and by allocator rounding; the blob is a
+> direct measurement of the same bytes. Both figures land on the prediction derived from
+> the Qwen3.6-27B config (34 and 18 KiB/token).
 >
 > Consequence: **the fixed 149.6 MiB floor, not the KV cache, is the dominant per-slot
 > cost at these context lengths**, and the real ceiling is far higher than 8K.

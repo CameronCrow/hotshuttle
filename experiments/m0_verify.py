@@ -129,7 +129,9 @@ def check_slots():
     resp = _req("POST", "/completion", {
         "prompt": "The capital of France is", "id_slot": 0,
         "n_predict": 8, "cache_prompt": True, "temperature": 0.0})
-    print(f"    POST /completion    -> tokens_evaluated={resp.get('tokens_evaluated')} "
+    # timings.prompt_n = tokens actually evaluated. NOT tokens_evaluated, which is the
+    # full prompt length whether or not it was cached (see docs/PLAN.md M1).
+    print(f"    POST /completion    -> evaluated={resp['timings']['prompt_n']} "
           f"content={resp.get('content','')[:40]!r}")
     results["completion"] = True
 

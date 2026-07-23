@@ -5,8 +5,10 @@
 Local orchestration tooling: one loaded copy of a local model on a single 8 GB GPU serving
 **many** small worker agents, by paging each worker's context state between VRAM (hot) and
 system RAM (warm) through llama-server slots — driven by a capable orchestrator model.
-**The orchestration layer is in planning — see [`docs/PLAN.md`](docs/PLAN.md)** (implementation
-plan) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (component specs).
+**The orchestration layer is in build — see [`docs/PLAN.md`](docs/PLAN.md)** (implementation
+plan) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (component specs). M0 (serving config +
+VRAM budget) and M1 (does slot paging actually skip re-prefill? — **yes**) are done; see
+[`experiments/`](experiments/). Next is M2, the SlotPool.
 
 What exists today is the **serving layer** that the orchestration builds on: tooling to run
 **Bonsai 27B** locally and serve it to agent harnesses — PrismML's ternary

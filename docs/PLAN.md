@@ -1,6 +1,6 @@
 # hotshuttle — Implementation Plan
 
-**Status:** planning · 2026-07-22
+**Status:** M0 ✅ · M1 ✅ · M2 next · 2026-07-22
 **Design source of record:** `brainstorm-vault/Ideas/Moving Off Claude To Open Weights.md`
 (private repo; sections "KV-cache tiering on one 8GB card", "Tuning the knobs", and
 "Orchestration layer: how Fable actually drives the workers", all dated 2026-07-22).
@@ -168,14 +168,15 @@ lands them behind env toggles so the existing single-shot workflow (`bonsai` ski
 >
 > | quantity | plan predicted (config) | bench computed | **measured** |
 > |---|---:|---:|---:|
-> | KV/token @ q8_0 | ~34 KiB | 128 KiB | **~37–40 KiB** |
-> | KV/token @ q4_0 | ~18 KiB | 64 KiB | **~22–23 KiB** |
+> | KV/token @ q8_0 | ~34 KiB | 128 KiB | **34.1 KiB** |
+> | KV/token @ q4_0 | ~18 KiB | 64 KiB | **18.1 KiB** |
 > | recurrent state / slot | ~150 MiB | not modeled | **149.626 MiB** |
 >
-> The ~5 KiB/token the plan under-predicted is quantization block-scale and alignment
-> overhead. The recurrent floor landed on the prediction exactly, and a saved slot blob
-> for a 5-token prompt weighs 149.8 MiB — i.e. **the blob is the recurrent state**, and
-> per-worker spill cost is essentially constant regardless of context length, as §6 assumed.
+> Every config-derived number in this plan was right. KV/token is measured by differencing
+> saved slot blobs (M1: a 2611-token worker saves at 236.5 MiB q8_0 / 195.7 MiB q4_0, less
+> the 149.6 MiB floor). A blob for a 5-token prompt weighs 149.8 MiB — i.e. **the blob is
+> mostly the recurrent state**, so per-worker spill cost is nearly flat in context length,
+> as §6 assumed.
 >
 > **But the operative constraint turned out to be neither formula.** 16K @ q8_0 does fit
 > and runs at full speed (29.8 t/s) — *when the Windows desktop holds ≲680 MiB of VRAM*.
@@ -286,14 +287,13 @@ All numbers config-derived (Qwen3.6-27B config) or measured, per the design sour
   256 head_dim × 2 (K+V) = 32,768 elements/token; the 256 head_dim makes it heavier per
   token than typical).
 
-Per-worker cost using the **measured** rates (M0: floor 149.6 MiB, q8_0 ~39 KiB/token,
-q4_0 ~22.5 KiB/token — the config-derived predictions in the bullets above ran ~5 KiB/token
-light, the difference being quant block-scale and alignment overhead):
+Per-worker cost using the **measured** rates (floor 149.6 MiB, q8_0 34.1 KiB/token,
+q4_0 18.1 KiB/token — the config-derived predictions in the bullets above were correct):
 
 | Per worker (floor + KV) | KV quant | 8K ctx | **12K ctx** | 16K ctx | 32K ctx |
 |---|---|---|---|---|---|
-| 149.6 MiB + KV | q8_0 | ~462 MiB | **~618 MiB** | ~774 MiB | ~1398 MiB |
-| 149.6 MiB + KV | q4_0 | ~330 MiB | ~420 MiB | ~510 MiB | ~870 MiB |
+| 149.6 MiB + KV | q8_0 | ~423 MiB | **~559 MiB** | ~696 MiB | ~1242 MiB |
+| 149.6 MiB + KV | q4_0 | ~295 MiB | ~367 MiB | ~440 MiB | ~730 MiB |
 
 Against a ~0.4–0.8 GiB budget: **1–2 hot slots, and only with modest context.**
 16K@q8_0 fits one slot headless. True double-buffering (two workers simultaneously
@@ -305,12 +305,29 @@ design leans on paging, not residency: everything beyond 1–2 hot workers lives
 RAM as saved blobs (~150 MiB + context KV each; a dozen warm workers ≈ 2–3 GB of RAM —
 trivial; 16 GB system RAM per `bench-results.md`).
 
-**Swap cost is cheap and roughly constant.** The 4060 Ti runs PCIe 4.0 **x8** (~12–13
-GB/s real host↔device), and a worker payload at working context lengths is tens-to-low-
-hundreds of MB → single-digit to low-double-digit ms each way, barely growing with the
-worker's context. It hides completely inside the orchestrator's own turn-processing plus
-Bonsai's seconds-long generation (~20–28 tok/s decode measured; weight-bandwidth-bound
-at ~288 GB/s, so KV quant is a **capacity** lever here, not a speed lever).
+**Swap cost is cheap and roughly constant** — the conclusion holds, but the estimate below
+was optimistic by ~50×; see the measured note.
+
+The 4060 Ti runs PCIe 4.0 **x8** (~12–13 GB/s real host↔device), and a worker payload at
+working context lengths is tens-to-low-hundreds of MB → single-digit to low-double-digit ms
+each way, barely growing with the worker's context. It hides completely inside the
+orchestrator's own turn-processing plus Bonsai's seconds-long generation (~20–28 tok/s
+decode measured; weight-bandwidth-bound at ~288 GB/s, so KV quant is a **capacity** lever
+here, not a speed lever).
+
+> **Measured (M1, 2026-07-22).** A 236.5 MiB q8_0 payload costs **170–1185 ms to save** and
+> **123–531 ms to restore** — not the ~10 ms the PCIe arithmetic predicts, because
+> `--slot-save-path` round-trips through the Windows filesystem, not straight over PCIe.
+> The variance is OS page-cache behaviour. q4_0 payloads (195.7 MiB) are consistently at
+> the fast end (~170 ms save, ~125 ms restore).
+>
+> **The design conclusion survives comfortably:** re-prefilling that same worker costs
+> 2611 tokens ÷ ~686 tok/s ≈ **3.8 s**, so restore is still ~10–30× cheaper than the thing
+> it replaces, and the gap *widens* with context (prefill is linear in tokens; the blob is
+> ~flat). It no longer disappears entirely inside one orchestrator turn, though, so the
+> idle-fill overlap in §7/M4 is doing real work rather than hiding a rounding error.
+> If save latency ever dominates, that is the trigger for the C-API route
+> (`llama_state_seq_get_data`/`set_data`, §3 Route 2) — which is exactly the ~10 ms path.
 
 **Levers for more concurrency, in order of preference:** page to RAM (cheap) → shorten
 context (cheap) → q4 the **K**-cache only, V stays q8 (small quality risk) → offload
@@ -414,7 +431,34 @@ cannot see `C:/…` paths, so `bonsai_client.ensure_up()` was silently failing w
 rc=127. Fixed by resolving the interpreter via `shutil.which`, plus `*.sh text eol=lf`
 in `.gitattributes` (WSL bash also chokes on a CRLF shebang).
 
-### M1 — THE open risk: does save/restore skip re-prefill on the PrismML fork?
+### M1 — THE open risk: does save/restore skip re-prefill on the PrismML fork? ✅ PASS 2026-07-22
+
+> **Answer: yes, on every leg tested.** `experiments/m1_save_restore.py`, 7 legs
+> (round-trip and after-server-restart × q8_0 and q4_0, plus a control). A 2611-token
+> worker, saved, evicted by prefilling a *different* worker into its slot, restored, then
+> continued with a 26-token new turn:
+>
+> | | cold prefill | warm continuation |
+> |---|---:|---:|
+> | tokens evaluated | 2611 | **28** |
+> | tokens reused from cache | 0 | **2615** |
+>
+> 1.1 % of the full prompt — well inside the ≤ suffix+64 pass criterion. The planted fact
+> came back verbatim, and it survives a **full server restart**, so warm state genuinely
+> outlives the process. Save 170–1185 ms, restore 123–531 ms (see the §6 note: slower than
+> predicted, still ~10–30× cheaper than the 3.8 s re-prefill it replaces).
+>
+> **The metric in this section and in ARCHITECTURE.md §3 was wrong and has been corrected.**
+> Both said to assert on the response's `tokens_evaluated`. That field is the *full prompt
+> length* whether or not anything was cached — it read 2643 on a run that actually
+> evaluated 28 tokens. The real telemetry is `timings.prompt_n` (evaluated) and
+> `timings.cache_n` (reused). Asserting on `tokens_evaluated`, as originally specified,
+> would have passed unconditionally and made M2's re-prefill regression test decorative.
+> This cost a false FAIL here before the control leg caught it, which is why the control
+> (same continuation, no save/restore, no eviction) is now a permanent part of the
+> experiment: it separates "paging is broken" from "the measurement is broken".
+
+**Original analysis, retained for provenance:**
 
 Whether slot save/restore actually avoids re-prefill for this **hybrid/recurrent** model
 on the fork is **unverified**, and it is the premise of the whole design. Upstream
@@ -427,20 +471,23 @@ unknown, so it may predate them.
 **Experiment** (`experiments/m1_save_restore.py`, runnable standalone):
 
 1. Dispatch worker A: `/completion` with `id_slot=0`, `cache_prompt=true`, a ~2,000-token
-   seed+turn prompt. Record `tokens_evaluated` (expect ≈ full prompt — cold prefill).
+   seed+turn prompt. Record `timings.prompt_n` (expect ≈ full prompt — cold prefill).
 2. `POST /slots/0?action=save` `{"filename":"A.bin"}`.
 3. Perturb the slot: erase it, or prefill a different worker B into it.
 4. `POST /slots/0?action=restore` `{"filename":"A.bin"}`.
 5. Dispatch A's follow-up: the identical prior prompt + a ~50-token appended turn, same
-   slot, `cache_prompt=true`. Record `tokens_evaluated`.
+   slot, `cache_prompt=true`. Record `timings.prompt_n`.
 
-**Pass:** step-5 `tokens_evaluated` ≈ the appended suffix only — operationally
-`tokens_evaluated ≤ suffix_tokens + 64` (allowing template-boundary slop), i.e. **< 10 %
-of the full prompt length**. Also: A's continuation is coherent with its pre-save
-context (a planted fact from the seed is recalled), guarding against a restore that
-"succeeds" with corrupt state.
-**Fail:** `tokens_evaluated` ≈ the whole prompt (re-prefill), or the recalled fact is
+**Pass:** step-5 `timings.prompt_n` ≈ the appended suffix only — operationally
+`prompt_n ≤ suffix_tokens + 64` (allowing template-boundary slop), i.e. **< 10 % of the
+full prompt length**. Also: A's continuation is coherent with its pre-save context (a
+planted fact from the seed is recalled), guarding against a restore that "succeeds" with
+corrupt state.
+**Fail:** `prompt_n` ≈ the whole prompt (re-prefill), or the recalled fact is
 lost/garbled.
+
+> Use `timings.prompt_n` / `timings.cache_n`, **not** `tokens_evaluated` — the latter is
+> the full prompt length regardless of caching and always "passes".
 
 Run the matrix: q8_0 and q4_0 KV × (save/restore round-trip, restore-after-server-
 restart). Record ms per save/restore (informs §6's swap-cost claim).
@@ -460,7 +507,7 @@ fixes target more directly. Record the outcome in this file either way.
 (A1, B1, A2, B2, …), forcing save/evict/restore on every dispatch.
 
 **Acceptance:** each worker's turn ≥2 evaluates only its new suffix (per-turn
-`tokens_evaluated` assertions as in M1); both conversations stay coherent and
+`timings.prompt_n` assertions as in M1); both conversations stay coherent and
 uncontaminated (each recalls its own planted fact, never the other's); pool invariants
 hold under an interleaving stress test (no dispatch to a processing slot, no evict
 without save); total wall-clock overhead of switching < 10 % of generation time.
@@ -509,8 +556,12 @@ updated with orchestration quick-start.
 - **Invariant fuzzing:** randomized task interleavings against the fake server; assert
   no dispatch-while-processing, no evict-without-save, no two workers claiming one slot.
 - **Integration tests (opt-in, real server):** marked `@pytest.mark.gpu`; M1's
-  experiment doubles as the canary. `tokens_evaluated` is tracked on every dispatch and
-  asserted — silent re-prefill regressions become test failures, not vibes.
+  experiment doubles as the canary. `timings.prompt_n` is tracked on every dispatch and
+  asserted — silent re-prefill regressions become test failures, not vibes. (**Not**
+  `tokens_evaluated`; see M1 §9 — it is the full prompt length and always passes.)
+  Every paging test carries a **control leg** that exercises the same continuation with
+  no save/restore and no eviction, so a broken measurement is distinguishable from
+  broken paging.
 - **Quality guard:** a small tool-call-success probe (N scoped tool-call prompts, parse
   rate measured) run at q8_0 vs q4_0 KV — because perplexity already told us nothing
   (§7), and tool-calling is the metric the workforce lives on.
@@ -523,10 +574,10 @@ updated with orchestration quick-start.
 
 | # | Risk | Severity | Verification |
 |---|---|---|---|
-| 1 | **Hybrid save/restore re-prefills on the PrismML fork** (upstream #22384/#19794 class) | High — premise of the design | **M1** (§9); fallback documented there |
+| 1 | ~~**Hybrid save/restore re-prefills on the PrismML fork** (upstream #22384/#19794 class)~~ | **CLOSED (M1) — does not occur** | 7/7 legs skip re-prefill (28 of 2643 tokens evaluated), including across a server restart. Fork post-dates the fixes |
 | 2 | ~~Fork lacks slot endpoints entirely, or predates recurrent-state serialization~~ | **CLOSED (M0)** | Endpoints present and functional; the fork also logs hybrid context checkpoints, so it post-dates that work |
 | 3 | ~~Sizing contradiction: bench's 64-layer KV formula vs config's 16-layer + 150 MiB floor~~ | **CLOSED (M0)** | Config reading confirmed; `bench-results.md` corrected |
-| 4 | Recurrent state restore is *lossy/approximate* (coherent-looking but degraded) | Medium | M1's planted-fact recall + a longer semantic probe in M2 |
+| 4 | Recurrent state restore is *lossy/approximate* (coherent-looking but degraded) | Medium — **partially checked** | M1's planted-fact recall passes on all legs, but that is a weak probe: the fact also sits in the re-sent prefix, so it cannot distinguish "restored correctly" from "re-read from the prompt". The real check is M2's longer semantic probe + cross-worker contamination test |
 | 5 | Byte-stable client-side template drifts from server Jinja (breaks prefix cache silently) | Medium | M0 byte-compare; unit prefix-stability checker |
 | 6 | WDDM/display VRAM pressure makes 16K@q8 marginal on a monitor-driving card | **CONFIRMED (M0) — upgraded to High; this is the binding constraint, not KV size** | Measured: identical config runs 29.8 t/s at a 346 MiB desktop and 6.4 t/s at 845 MiB, silently. Mitigated by the 12K default; `--measure` re-runs the matrix when the desktop changes |
 | 7 | q4-K squeeze (for slot #2) hurts tool-call rate more than perplexity suggested | Low | §10 quality guard probe |
