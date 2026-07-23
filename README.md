@@ -10,6 +10,30 @@ with every measurement) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (comp
 Milestones M0–M5 are done and each has a runnable acceptance script under
 [`experiments/`](experiments/).
 
+## Install as a Claude Code plugin
+
+```
+/plugin marketplace add CameronCrow/hotshuttle
+/plugin install hotshuttle@hotshuttle
+```
+
+Adds a `bonsai` skill and an MCP server with seven tools — a free, private, offline model in
+any session:
+
+| tool | |
+|---|---|
+| `bonsai_status` / `bonsai_start` | server lifecycle |
+| `bonsai_chat` | one-shot call, thinking already disabled |
+| `worker_spawn` / `worker_ask` / `worker_list` / `worker_retire` | **persistent** workers sharing one GPU slot |
+
+The `worker_*` tools are the interesting half. Spawn more workers than the card has slots —
+one, here — and each keeps its own context between calls anyway, because the pool saves and
+restores their state around every switch. A returning worker evaluates only its new turn.
+
+Weights and the llama.cpp fork are fetched separately (see Setup); the plugin drives what is
+already on the machine. Requires the MCP Python SDK (`pip install mcp`) and, for
+`workers.yaml`, PyYAML.
+
 ## Orchestration quick-start
 
 ```bash

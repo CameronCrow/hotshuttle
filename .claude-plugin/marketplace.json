@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "hotshuttle",
+  "version": "0.1.0",
+  "description": "Local Bonsai 27B serving plus a worker pool that pages many agent contexts through one GPU slot",
+  "owner": {
+    "name": "Cameron Crow"
+  },
+  "plugins": [
+    {
+      "name": "hotshuttle",
+      "description": "Run many worker agents off one local Bonsai 27B on a single 8GB GPU, paging their contexts between VRAM and disk",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}
