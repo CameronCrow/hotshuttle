@@ -128,7 +128,7 @@ Assessment against what orchestration needs:
 |---|---|---|---|
 | flash-attention | `-fa 1` | on (required for quantized KV) | **keep** |
 | `--parallel` | `1` | `1` (1 hot slot on 8 GB; §6) | **keep**, make env-tunable (`BONSAI_SLOTS`) for the 2-slot experiment |
-| `-c` (total ctx) | `8192` | **`16384`** (16K per-slot default; §7) | **change** |
+| `-c` (total ctx) | `8192` | **`12288`** (12K per-slot default; §7 — revised down from 16K by M0 measurement) | **change** |
 | KV quant | `q4_0` / `q4_0` | **`q8_0` / `q8_0`** default (§7) | **change** |
 | `--slot-save-path` | **absent** | **required** — without it the save/restore endpoints do not function | **add** |
 | slot endpoints | not enabled | `GET /slots` needed by the pool for `is_processing` checks | **add `--slots`** (and never `--no-slots`) |
@@ -139,15 +139,17 @@ Concrete new invocation (in `bonsai.sh` terms; `serve.bat` mirrors it):
 
 ```bash
 "$SERVER" -m "$MODEL" --alias bonsai-27b --host 127.0.0.1 --port "$PORT" \
-  -ngl 99 -c 16384 --parallel 1 \
+  -ngl 99 -c 12288 --parallel 1 \
   -fa 1 --cache-type-k q8_0 --cache-type-v q8_0 \
   --slots --slot-save-path "$SLOT_DIR" \
   --jinja --temp 0.7 --top-p 0.95 --top-k 20
 ```
 
-Plus an opt-in **long-input mode** (env `BONSAI_LONGCTX=1`): `-c 32768` with
-`--cache-type-k q4_0 --cache-type-v q4_0` — 32K *forces* q4 KV on this card and degrades
-long-retrieval; see §7 for why it is opt-in, not default.
+Long-input mode is `BONSAI_CTX=32768 BONSAI_KV_QUANT=q4_0` — 32K *forces* q4 KV on this
+card and degrades long-retrieval; see §7 for why it is opt-in, not default. (The plan
+originally specified a `BONSAI_LONGCTX=1` shorthand for this; it was dropped as an alias
+for two env vars that already exist. The coupling it encoded — 32K forces q4 — is a
+comment in `bonsai.sh` and `serve.bat`.)
 
 **`$SLOT_DIR` on Windows:** `--slot-save-path` writes slot blobs to disk files and
 Windows has no tmpfs. Route 1 (start here): a normal directory (e.g.
@@ -160,18 +162,28 @@ if disk churn actually shows up): hold blobs in process RAM via the C API
 lands them behind env toggles so the existing single-shot workflow (`bonsai` skill,
 `run_paper.sh`) is not disturbed.
 
-> **⚠ Sizing contradiction to resolve in M0** — `bench-results.md` computed KV/token as
-> `64 layers × 4 KV heads × (256+256)` → 256 KB/token f16, and on that basis gated out
-> q8_0@8K and everything ≥16K as "won't fit". But the Qwen3.6-27B config says only **16**
-> of the 64 layers carry a growing KV cache (the other 48 are DeltaNet with a fixed
-> ~150 MiB/slot recurrent state) → **~34 KiB/token at q8_0**, roughly **4× smaller** than
-> the bench's formula, plus a fixed floor the bench never modeled. If llama.cpp
-> allocates KV only for the 16 attention layers (it should, for hybrids), then 16K@q8_0
-> (~694 MiB/slot incl. floor) fits headless and the bench's "16K+ needs a bigger GPU"
-> conclusion is an artifact of the wrong formula. M0 measures actual allocation from
-> server logs / `nvidia-smi` and updates `bench-results.md` with a correction note.
-> Until then, treat the table in §6 (config-derived) as the planning basis and the bench
-> gates as suspect.
+> **✅ Sizing contradiction RESOLVED in M0 (2026-07-22)** — the config-derived reading was
+> right and `bench-results.md`'s 64-layer formula was wrong by ~3.4×; that file now carries
+> a correction note. Measured by `experiments/m0_verify.py`:
+>
+> | quantity | plan predicted (config) | bench computed | **measured** |
+> |---|---:|---:|---:|
+> | KV/token @ q8_0 | ~34 KiB | 128 KiB | **~37–40 KiB** |
+> | KV/token @ q4_0 | ~18 KiB | 64 KiB | **~22–23 KiB** |
+> | recurrent state / slot | ~150 MiB | not modeled | **149.626 MiB** |
+>
+> The ~5 KiB/token the plan under-predicted is quantization block-scale and alignment
+> overhead. The recurrent floor landed on the prediction exactly, and a saved slot blob
+> for a 5-token prompt weighs 149.8 MiB — i.e. **the blob is the recurrent state**, and
+> per-worker spill cost is essentially constant regardless of context length, as §6 assumed.
+>
+> **But the operative constraint turned out to be neither formula.** 16K @ q8_0 does fit
+> and runs at full speed (29.8 t/s) — *when the Windows desktop holds ≲680 MiB of VRAM*.
+> At ~800 MiB of desktop it thrashes to 6.4 t/s. Same binary, same flags, 4× slowdown,
+> and WDDM makes it **silent**: the server still starts, still answers, and still reports
+> a similar `nvidia-smi memory.used`. This is risk #6 in §11, which was rated Low-Medium
+> and is in fact the binding constraint. Hence the 12K default (§7) — it holds full speed
+> with ~845 MiB of desktop budget. Decode rate, not `memory.used`, is the fit test.
 
 ---
 
@@ -274,10 +286,14 @@ All numbers config-derived (Qwen3.6-27B config) or measured, per the design sour
   256 head_dim × 2 (K+V) = 32,768 elements/token; the 256 head_dim makes it heavier per
   token than typical).
 
-| Per worker (floor + KV) | KV quant | 8K ctx | 16K ctx | 32K ctx |
-|---|---|---|---|---|
-| 150 MiB + KV | q8_0 | ~422 MiB | **~694 MiB** | ~1238 MiB |
-| 150 MiB + KV | q4_0 | ~294 MiB | ~438 MiB | ~726 MiB |
+Per-worker cost using the **measured** rates (M0: floor 149.6 MiB, q8_0 ~39 KiB/token,
+q4_0 ~22.5 KiB/token — the config-derived predictions in the bullets above ran ~5 KiB/token
+light, the difference being quant block-scale and alignment overhead):
+
+| Per worker (floor + KV) | KV quant | 8K ctx | **12K ctx** | 16K ctx | 32K ctx |
+|---|---|---|---|---|---|
+| 149.6 MiB + KV | q8_0 | ~462 MiB | **~618 MiB** | ~774 MiB | ~1398 MiB |
+| 149.6 MiB + KV | q4_0 | ~330 MiB | ~420 MiB | ~510 MiB | ~870 MiB |
 
 Against a ~0.4–0.8 GiB budget: **1–2 hot slots, and only with modest context.**
 16K@q8_0 fits one slot headless. True double-buffering (two workers simultaneously
@@ -304,13 +320,20 @@ used).
 
 ---
 
-## 7. Context length: 16K default, 32K opt-in
+## 7. Context length: 12K default, 16K and 32K opt-in
+
+> **Revised by M0 (2026-07-22): the default is 12288, not 16384.** 16K @ q8_0 measured
+> at full speed and remains available via `BONSAI_CTX=16384`, but it needs the Windows
+> desktop under ~680 MiB of VRAM and degrades silently past that (§3). 12K @ q8_0 holds
+> 30.2 t/s with ~845 MiB of desktop budget. Force 2 and 3 below are unchanged and still
+> argue for the shorter window; force 1 is what moved.
 
 The live tuning decision, locked as follows (three independent forces, same direction):
 
-1. **VRAM.** 16K@q8_0 (~694 MiB/slot) fits headless; 32K@q8_0 (~1238 MiB) does not —
-   running 32K *forces* q4 KV (and possibly CPU offload). So the choice of length is
-   also a choice of KV precision.
+1. **VRAM.** 12K@q8_0 (~7345 MiB total server footprint, measured) leaves enough headroom
+   for a normal desktop; 16K@q8_0 (~7507 MiB) fits only a quiet one; 32K@q8_0 does not fit
+   at all — running 32K *forces* q4 KV. So the choice of length is also a choice of KV
+   precision.
 2. **Low-bit quant wrecks long context specifically.** Measured elsewhere
    (RULER/ONERULER): 8-bit KV holds ~99 % accuracy to 64K, but **4-bit KV drops
    long-context retrieval by ~16–23 %, worsening as input grows**. Bonsai's weights are
@@ -366,22 +389,30 @@ the orchestrator processes worker A's response off-GPU, task B grabs the slot).
 Smallest testable slice first. Correctness of paging + compaction is proven before any
 concurrency; everything above `n_slots=1` is an optimization.
 
-### M0 — Serving config + budget verification (prerequisite, ~half a day)
+### M0 — Serving config + budget verification ✅ DONE 2026-07-22
 
 Land the §3 flag changes behind env toggles (`BONSAI_SLOTS`, `BONSAI_SLOT_DIR`,
-`BONSAI_KV_QUANT`, `BONSAI_LONGCTX`); default behavior for existing callers unchanged
-until verified. Then measure.
+`BONSAI_KV_QUANT`); default behavior for existing callers unchanged until verified.
+Then measure. Verifier: `experiments/m0_verify.py` (`--measure` for the VRAM matrix).
 
-**Acceptance:**
-- Server starts with `--slots --slot-save-path`; `GET /slots` returns slot state;
-  `POST /slots/0?action=save` writes a blob file.
-- Measured VRAM (server log allocation lines + `nvidia-smi`) resolves the §3 sizing
-  contradiction: record actual KV-cache allocation at 16K q8_0 and actual recurrent
-  ("SSM"/state) buffer size; update `bench-results.md` with a correction note.
-- 16K@q8_0 either confirmed to fit (expected) or the default is revised downward with
-  the measured numbers written here.
-- Prompt-compiler template render is byte-identical to the server's Jinja render with
-  `enable_thinking=false` (compare against `/apply-template` or a logged render).
+**Acceptance — all met:**
+- ✅ Server starts with `--slots --slot-save-path`; `GET /slots` returns slot state with
+  `is_processing`; `POST /slots/0?action=save` writes a 149.8 MiB blob;
+  `?action=restore` returns ok.
+- ✅ Sizing contradiction resolved (§3): KV ~37–40 KiB/token @ q8_0 (bench said 128),
+  recurrent state 149.626 MiB/slot. `bench-results.md` corrected.
+- ✅ 16K@q8_0 confirmed to fit **and** found to be desktop-VRAM-marginal; default revised
+  to **12288 @ q8_0** with the measured numbers in §7 and `bench-results.md`.
+- ✅ Template ground truth captured from `/apply-template`:
+  `enable_thinking=false` appends `<|im_start|>assistant\n<think>\n\n</think>\n\n` — the
+  empty-think form §4 predicted. Saved to `experiments/m0_template_ground_truth.txt`;
+  the compiler is asserted against it in M2.
+
+**Also found (not in the plan):** `bash` invoked from Python resolves to WSL's
+`System32\bash.exe`, not git-bash — Windows searches System32 before `PATH`. WSL bash
+cannot see `C:/…` paths, so `bonsai_client.ensure_up()` was silently failing with
+rc=127. Fixed by resolving the interpreter via `shutil.which`, plus `*.sh text eol=lf`
+in `.gitattributes` (WSL bash also chokes on a CRLF shebang).
 
 ### M1 — THE open risk: does save/restore skip re-prefill on the PrismML fork?
 
@@ -493,11 +524,11 @@ updated with orchestration quick-start.
 | # | Risk | Severity | Verification |
 |---|---|---|---|
 | 1 | **Hybrid save/restore re-prefills on the PrismML fork** (upstream #22384/#19794 class) | High — premise of the design | **M1** (§9); fallback documented there |
-| 2 | Fork lacks slot endpoints entirely, or predates recurrent-state serialization | High | M0 smoke test; if absent, evaluate rebasing the fork or cherry-picking |
-| 3 | Sizing contradiction: bench's 64-layer KV formula vs config's 16-layer + 150 MiB floor | Medium — decides 16K@q8 default | M0 measurement; correct `bench-results.md` |
+| 2 | ~~Fork lacks slot endpoints entirely, or predates recurrent-state serialization~~ | **CLOSED (M0)** | Endpoints present and functional; the fork also logs hybrid context checkpoints, so it post-dates that work |
+| 3 | ~~Sizing contradiction: bench's 64-layer KV formula vs config's 16-layer + 150 MiB floor~~ | **CLOSED (M0)** | Config reading confirmed; `bench-results.md` corrected |
 | 4 | Recurrent state restore is *lossy/approximate* (coherent-looking but degraded) | Medium | M1's planted-fact recall + a longer semantic probe in M2 |
 | 5 | Byte-stable client-side template drifts from server Jinja (breaks prefix cache silently) | Medium | M0 byte-compare; unit prefix-stability checker |
-| 6 | WDDM/display VRAM pressure makes 16K@q8 marginal on a monitor-driving card | Low-Medium | M0 measures both headless and with desktop; fallback 16K@q4-K/q8-V |
+| 6 | WDDM/display VRAM pressure makes 16K@q8 marginal on a monitor-driving card | **CONFIRMED (M0) — upgraded to High; this is the binding constraint, not KV size** | Measured: identical config runs 29.8 t/s at a 346 MiB desktop and 6.4 t/s at 845 MiB, silently. Mitigated by the 12K default; `--measure` re-runs the matrix when the desktop changes |
 | 7 | q4-K squeeze (for slot #2) hurts tool-call rate more than perplexity suggested | Low | §10 quality guard probe |
 | 8 | Save/restore blob I/O churn on spinning OS page cache (Windows, no tmpfs) | Low | measure in M2; escalate to C-API route only if real |
 | 9 | `--parallel 2` interactions: `-c` splits across slots; continuous batching + hybrid | Low (post-M4) | 2-slot experiment after M4, headless |

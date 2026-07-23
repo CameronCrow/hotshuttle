@@ -13,18 +13,28 @@
 # CALLER MUST DISABLE THINKING: Bonsai is a reasoning model; send
 #   "chat_template_kwargs": {"enable_thinking": false}
 # in every request, or it spends the whole token budget on <think> and returns empty content.
-# Config rationale: --parallel 1 (4 slots overfill the 8GB card -> WDDM thrash); quantized KV + -fa
-# (weights fill ~6.7GB, KV must be small to fit). Override via env:
+# Config rationale (all measured 2026-07-22, see bench-results.md "Correction"):
+#   --parallel 1  : 4 slots overfill the 8GB card -> WDDM thrash.
+#   -c 12288      : 12K @ q8_0 runs full speed (30 t/s) and leaves ~845 MiB for the Windows
+#                   desktop. 16K also runs full speed but only if the desktop stays under
+#                   ~680 MiB -- a browser can blow that, and the failure is SILENT (the
+#                   server still starts and answers, ~4x slower). So 16K is opt-in.
+#   q8_0 KV       : ~37-40 KiB/token. There is headroom for it now that the real KV cost is
+#                   known (bench-results.md's old 64-layer formula was ~3.4x too high --
+#                   only 16 of Bonsai's 64 layers grow a KV cache; the other 48 are DeltaNet
+#                   with a fixed 149.6 MiB recurrent state). Prefer precision over context:
+#                   q4_0 looks free on perplexity but tool-call rate is what a worker fleet
+#                   lives on, and 2-bit weights are already -7.4% there.
+# Override via env:
 #   BONSAI_DIR, BONSAI_MODEL, BONSAI_PORT, BONSAI_CTX, BONSAI_SLOTS, BONSAI_KV_QUANT, BONSAI_SLOT_DIR.
 # BONSAI_CTX is the TOTAL context; llama-server splits it across BONSAI_SLOTS (ctx_per_slot = CTX/SLOTS).
-# 32K "long input" mode = BONSAI_CTX=32768 BONSAI_KV_QUANT=q4_0 -- 32K does not fit at q8_0 on this
-# card, and q4 KV costs ~16-23% long-context retrieval, so it is opt-in per call, not a default.
+# 32K "long input" mode = BONSAI_CTX=32768 BONSAI_KV_QUANT=q4_0 (32K does not fit at q8_0).
 set -u
 BONSAI_DIR="${BONSAI_DIR:-/c/Users/Cameron/Projects/bonsai}"
 MODEL="${BONSAI_MODEL:-$BONSAI_DIR/models/Ternary-Bonsai-27B-Q2_0.gguf}"
 SERVER="$BONSAI_DIR/llama.cpp/build/bin/llama-server.exe"
-HOST=127.0.0.1; PORT="${BONSAI_PORT:-8080}"; CTX="${BONSAI_CTX:-8192}"
-SLOTS="${BONSAI_SLOTS:-1}"; KV="${BONSAI_KV_QUANT:-q4_0}"
+HOST=127.0.0.1; PORT="${BONSAI_PORT:-8080}"; CTX="${BONSAI_CTX:-12288}"
+SLOTS="${BONSAI_SLOTS:-1}"; KV="${BONSAI_KV_QUANT:-q8_0}"
 SLOT_DIR="${BONSAI_SLOT_DIR:-$BONSAI_DIR/bench-logs/slots}"
 URL="http://$HOST:$PORT"
 LOG="$BONSAI_DIR/bench-logs/bonsai-server.log"

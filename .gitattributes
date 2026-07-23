@@ -1,1 +1,3 @@
-.claude/hooks/*.sh text eol=lf
+# Shell scripts must be LF: WSL bash chokes on a CRLF shebang, and these get run from
+# Python (experiments/m0_verify.py, bonsai_client.py) where the interpreter varies.
+*.sh text eol=lf
